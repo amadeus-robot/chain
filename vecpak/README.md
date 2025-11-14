@@ -1,6 +1,9 @@
 # VecPak
 A deterministic no-schema simple serializer  
 
+<img width="1024" height="1024" alt="image" src="https://github.com/user-attachments/assets/7e5c7eee-e338-47f1-b706-d696cf3e3627" />
+
+
 ### Standards
 
 First try the ones below  
@@ -36,8 +39,10 @@ Map keys can be anything (making Tuple usage easy) and are ordered by encoded by
 ### TODO  
   
 A serde implementation so Term Enum can be skipped, HashMap properly supported and RUST types directly mapped.  
-Decode/Encode bigger numbers than i128 for VarInt  
-  
+Decode/Encode bigger numbers than i128 for VarInt.  
+
+### Usage
+
 ```rust
 use vecpak::{encode, decode, Term};
 
