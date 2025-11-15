@@ -3,7 +3,7 @@ defmodule VecPakEx.MixProject do
 
   def project do
     [
-      app: :vecpak_ex,
+      app: :vecpak_ex_nif,
       version: "0.1.0",
       elixir: "~> 1.19",
       build_embedded: Mix.env() == :prod,

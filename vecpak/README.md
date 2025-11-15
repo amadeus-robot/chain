@@ -44,6 +44,9 @@ Decode/Encode bigger numbers than i128 for VarInt.
 ### Usage
 
 ```rust
+//Cargo.toml
+//vecpak = { git = "https://github.com/amadeusprotocol/chain", package = "vecpak" }
+
 use vecpak::{encode, decode, Term};
 
 encode(Term::Binary(b"peter piper picked a pack of pickled peppers"))?;

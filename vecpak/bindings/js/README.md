@@ -4,9 +4,9 @@
 
 ```js
 //  Add to package.json
-// "@amadeus/vecpak-js": "https://gitpkg.now.sh/amadeusprotocol/chain/vecpak/bindings/js?main"
+// "@amadeus-protocol/vecpak-js": "https://gitpkg.now.sh/amadeusprotocol/chain/vecpak/bindings/js?main"
 
-import { encode, decode } from "@amadeus/vecpak-js";
+import { encode, decode } from "@amadeus-protocol/vecpak-js";
 
 const tx = {
 	signer: globalState.pk,

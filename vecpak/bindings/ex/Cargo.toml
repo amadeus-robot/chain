@@ -1,0 +1,9 @@
+[package]
+name = "vecpak_ex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustler = { version = "0.36.1", features = ["big_integer"] }
+num-traits = "0.2" #for bigint
+vecpak = { path = "../../" }

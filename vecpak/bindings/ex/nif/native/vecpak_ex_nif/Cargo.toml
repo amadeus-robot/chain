@@ -1,5 +1,5 @@
 [package]
-name = "vecpak_ex"
+name = "vecpak_ex_nif"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,4 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.36.1"
-vecpak = { path = "../../../../" }
+vecpak_ex = { path = "../../../" }

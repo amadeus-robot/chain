@@ -1,5 +1,5 @@
 {
-  "name": "@amadeus/vecpak-js",
+  "name": "@amadeus-protocol/vecpak-js",
   "version": "0.1.0",
   "description": "JS bindings for vecpak",
   "type": "module",
