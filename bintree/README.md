@@ -1,7 +1,7 @@
 # Hot Unified Binary Tree
 An unordered binary tree with hot paths 
 
-<img width="1024" height="1024" alt="image" src="https://github.com/user-attachments/assets/7e5c7eee-e338-47f1-b706-d696cf3e3627" />
+<img width="1024" height="1024" alt="image" src="https://github.com/user-attachments/assets/d225737a-cca0-4e64-840a-2cc8c0a8385a" />
 
 ### Features
   
