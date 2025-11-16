@@ -395,6 +395,60 @@ fn verify_proof(
     &cur == root
 }
 
+fn delete_stem(node: &mut Node, stem: Stem, depth: usize) -> bool {
+    match node {
+        Node::Empty => false,
+
+        Node::StemLeaf { stem: s, .. } => {
+            if *s == stem {
+                *node = Node::Empty;
+                true
+            } else {
+                false
+            }
+        }
+
+        Node::Internal { left, right, hash } => {
+            let b = stem_bit(&stem, depth);
+            let removed = if b == 0 {
+                delete_stem(left, stem, depth + 1)
+            } else {
+                delete_stem(right, stem, depth + 1)
+            };
+
+            if !removed {
+                return false;
+            }
+
+            // After removal, see if we can compress this node
+            match (&**left, &**right) {
+                (Node::Empty, Node::Empty) => {
+                    // no children left -> whole subtree is empty
+                    *node = Node::Empty;
+                }
+                (Node::Empty, Node::StemLeaf { .. }) => {
+                    // only right child is a leaf -> collapse to that leaf
+                    let mut tmp = Node::Empty;
+                    std::mem::swap(&mut tmp, &mut **right);
+                    *node = tmp;
+                }
+                (Node::StemLeaf { .. }, Node::Empty) => {
+                    // only left child is a leaf -> collapse to that leaf
+                    let mut tmp = Node::Empty;
+                    std::mem::swap(&mut tmp, &mut **left);
+                    *node = tmp;
+                }
+                _ => {
+                    // still has at least one non-empty child on each side -> stay internal
+                    *hash = h_pair(&left.hash(), &right.hash());
+                }
+            }
+
+            true
+        }
+    }
+}
+
 /// Updatable binary-state tree (SHA-256 merkelization) with sparse 256-leaf stems.
 struct BinaryStateTree {
     stems: HashMap<Stem, StemBucket>,
@@ -537,29 +591,59 @@ impl BinaryStateTree {
 
     fn insert_many_incremental(&mut self, entries: &[(Bytes32, Bytes32)]) {
         use std::collections::HashSet;
-        let mut touched: HashSet<Stem> = HashSet::new();
 
-        // 1) Update buckets sparsely (same as before)
+        let mut touched_stems: HashSet<Stem> = HashSet::new(); // stems whose hashes must be updated
+        let mut emptied_stems: HashSet<Stem> = HashSet::new(); // stems that became empty in this batch
+
+        // 1) Apply updates to buckets
         for (k, v) in entries {
             let mut stem = [0u8; 31];
             stem.copy_from_slice(&k[..31]);
             let sub = k[31];
-            let sb = self.stems.entry(stem).or_insert_with(|| StemBucket {
-                stem,
-                leaves: HashMap::new(),
-                subtree_root: ZERO32,
-                stem_hash: ZERO32,
-            });
-            sb.leaves.insert(sub, *v);   // overwrite if present
-            touched.insert(stem);
+
+            if *v == ZERO32 {
+                // --- DELETE semantics: remove this subindex if it exists ---
+                if let Some(sb) = self.stems.get_mut(&stem) {
+                    if sb.leaves.remove(&sub).is_some() {
+                        if sb.leaves.is_empty() {
+                            // bucket is now empty; schedule full stem removal
+                            emptied_stems.insert(stem);
+                        } else {
+                            touched_stems.insert(stem);
+                        }
+                    }
+                }
+            } else {
+                // --- NORMAL UPSERT ---
+                let sb = self.stems.entry(stem).or_insert_with(|| StemBucket {
+                    stem,
+                    leaves: HashMap::new(),
+                    subtree_root: ZERO32,
+                    stem_hash:    ZERO32,
+                });
+
+                sb.leaves.insert(sub, *v);   // overwrite if present
+                // if we previously marked this stem as emptied, undo that
+                emptied_stems.remove(&stem);
+                touched_stems.insert(stem);
+            }
         }
 
-        // 2) Recompute *only* the touched stem hashes and upsert them into the tree
-        for stem in touched {
-            let sb = self.stems.get_mut(&stem).unwrap();
-            sb.subtree_root = subtree_root_sparse(&sb.leaves);        // ≤ 8 hashes per new/changed leaf
-            sb.stem_hash    = stem_node_hash(&sb.stem, &sb.subtree_root);
-            upsert_stem(&mut self.root, sb.stem, sb.stem_hash, 0);    // ≈ log2(#stems) rehashes
+        // 2) Recompute hashes and upsert non-empty stems
+        for stem in &touched_stems {
+            if let Some(sb) = self.stems.get_mut(stem) {
+                sb.subtree_root = subtree_root_sparse(&sb.leaves); // ≤ 8 hashes per updated leaf
+                sb.stem_hash    = stem_node_hash(&sb.stem, &sb.subtree_root);
+                upsert_stem(&mut self.root, sb.stem, sb.stem_hash, 0); // ≈ log2(#stems) rehashes
+            }
+        }
+
+        // 3) Remove stems that became completely empty
+        for stem in emptied_stems {
+            // drop bucket from map
+            self.stems.remove(&stem);
+            // prune from the stem tree
+            delete_stem(&mut self.root, stem, 0);
         }
     }
 }
@@ -643,8 +727,8 @@ fn main() {
     let mut rng = StdRng::seed_from_u64(0xE1F5_7864);
 
     // -------- 1) Build initial tree with 10,000,000 random pairs
-    let mut initial = Vec::with_capacity(20_000_000);
-    for _ in 0..20_000_000 {
+    let mut initial = Vec::with_capacity(100);
+    for _ in 0..100 {
         let mut rkey = [0u8; 32];
         let mut rval = [0u8; 32];
         rng.fill_bytes(&mut rkey);
@@ -692,6 +776,21 @@ fn main() {
             assert!(ok, "verification should succeed for initial proof {}", i + 1);
         }
     }
+
+    let mut added2 = Vec::with_capacity(1);
+    //let key = sha256_32(b"test");
+    //let val = sha256_32(&ZERO32);
+    //added2.push((key, val));
+
+    tree.insert_many_incremental(&added2);
+
+    println!("-----------");
+    if let Some((v, sibs256, path)) = tree.prove_for_key(&key) {
+        println!("value:        0x{} 0x{}", hex(v), hex(sha256_32(b"test")));
+        let ok = verify_proof(&root_before, &key, &v, &sibs256, &path);
+        println!("verify:       {}", ok);
+    }
+    println!("-----------");
 
     // -------- 2) UPDATE: add another 1,000 pairs
     let mut added = Vec::with_capacity(10_000);
