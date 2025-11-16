@@ -17,6 +17,8 @@ RUSTFLAGS="-C target-cpu=native" cargo run --release
 ```
 
 ```
+https://eips.ethereum.org/EIPS/eip-7864
+
 bintree/rs_0
 10m elements initial | 55409 ms
 10k update | 6 ms
