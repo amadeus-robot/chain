@@ -1,5 +1,5 @@
 [package]
-name = "bintree"
+name = "hubt"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,7 @@ lto = "fat"
 codegen-units = 1
 
 [dependencies]
-rand = "0.9"
-sha2 = "0.10"
-hex = "0.4"
-rayon = "1"
+#sha2 = { version = "0.10", features = ["asm"] }
+sha2 = { version = "0.10" }
+rayon = "1.8"
+rocksdb = "0.21"
