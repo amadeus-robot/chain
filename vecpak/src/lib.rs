@@ -8,7 +8,7 @@ pub use error::Error;
 pub use ser::to_vec;
 pub use de::from_slice;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Term {
     Nil(),
     Bool(bool),
