@@ -1,4 +1,14 @@
-#[derive(Debug, Clone)]
+use serde::{Serialize, Deserialize};
+
+mod error;
+mod ser;
+mod de;
+
+pub use error::Error;
+pub use ser::to_vec;
+pub use de::from_slice;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Term {
     Nil(),
     Bool(bool),

@@ -34,30 +34,34 @@ If they dont fit your use case continue reading.
 
 4 is unlucky so its not included as a tag, it gives you a 2bit ECC error when used.  
   
-Map keys can be anything (making Tuple usage easy) and are ordered by encoded byte representation.    
-  
-### TODO  
-  
-A serde implementation so Term Enum can be skipped, HashMap properly supported and RUST types directly mapped.  
-Decode/Encode bigger numbers than i128 for VarInt.  
+Map keys can be anything (making Tuple usage easy) and are ordered by encoded byte representation.
+
+### Features
+
+- Serde implementation - serialize/deserialize any Rust type directly
+- HashMap support with canonical key ordering
+- Direct type mapping without Term enum
+
+### Limitations
+
+- Floats not supported
+- VarInt numbers >i128 are not supported
 
 ### Usage
 
 ```rust
-//Cargo.toml
-//vecpak = { git = "https://github.com/amadeusprotocol/chain", package = "vecpak" }
+use serde::{Serialize, Deserialize};
+use vecpak::{to_vec, from_slice};
+use std::collections::HashMap;
 
-use vecpak::{encode, decode, Term};
+#[derive(Serialize, Deserialize)]
+struct MyData {
+    name: String,
+    age: u32,
+    active: bool,
+}
 
-encode(Term::Binary(b"peter piper picked a pack of pickled peppers"))?;
-encode(Term::VarInt(67 as i128))?;
-let bin = encode(Term::PropList( // Map and PropList == same Tag but RUST implementation needs fixes to play nice with types
-    [
-        (Term::Binary(b"fruit"), Term::Binary(b"apple")),
-        (Term::Binary(b"color"), Term::Binary(b"red")),
-        (Term::Binary(b"amount"), Term::VarInt(1 as i128)),
-    ]
-))?;
-
-decode(bin.as_slice())?;
+let data = MyData { name: "Alice".into(), age: 30, active: true };
+let bytes = vecpak::to_vec(&data)?;
+let decoded: MyData = vecpak::from_slice(&bytes)?;
 ```
