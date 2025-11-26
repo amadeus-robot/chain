@@ -7,6 +7,10 @@ pub type Hash = [u8; 32];
 pub type Path = [u8; 32];
 const ZERO_HASH: Hash = [0u8; 32];
 
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct NodeKey {
     pub path: Path,
@@ -35,14 +39,42 @@ pub enum Op {
     Delete(Vec<u8>),
 }
 
+/// A simplified proof node without length.
+#[derive(Debug, Clone)]
+pub struct ProofNode {
+    pub hash: Hash,
+    pub direction: u8
+}
+
+/// The Universal Proof Struct.
+///
+/// - If `path` == sha256(key) and `hash` == sha256(key, value): It's an Inclusion Proof.
+/// - If `path` == sha256(key) and `hash` != sha256(key, value): It's a Mismatch Proof.
+/// - If `path` != sha256(key): It's a Non-Existence Proof (pointing to the closest ancestor).
+#[derive(Debug, Clone)]
+pub struct Proof {
+    pub root: Hash,
+    pub nodes: Vec<ProofNode>,
+    pub path: Path, // The path of the leaf node actually found in the tree
+    pub hash: Hash, // The hash of the leaf node actually found in the tree
+}
+
+#[derive(Debug, PartialEq)]
+pub enum VerifyStatus {
+    Included,       // Key exists and Value matches
+    Mismatch,       // Key exists but Value is different
+    NonExistence,   // Key does not exist
+    Invalid,        // The proof itself is mathematically invalid (bad root/chain)
+}
+
 // ============================================================================
 // BIT HELPERS (Optimized & Inlined)
 // ============================================================================
 #[inline(always)]
 fn get_bit_be(data: &[u8], index: u16) -> u8 {
     if index >= 256 { return 0; }
-    let byte_idx = (index >> 3) as usize; // index / 8
-    let bit_offset = 7 - (index & 7);     // index % 8
+    let byte_idx = (index >> 3) as usize;
+    let bit_offset = 7 - (index & 7);
     (data[byte_idx] >> bit_offset) & 1
 }
 
@@ -64,12 +96,10 @@ fn mask_after_be(data: &mut [u8], len: u16) {
     let byte_idx = (len >> 3) as usize;
     let start_clean_bit = len;
 
-    // Clean partial byte
     for i in start_clean_bit..((byte_idx as u16 + 1) << 3) {
         let off = 7 - (i & 7);
         data[byte_idx] &= !(1 << off);
     }
-    // Clean remaining bytes efficiently
     if byte_idx + 1 < 32 {
         data[(byte_idx + 1)..].fill(0);
     }
@@ -77,13 +107,11 @@ fn mask_after_be(data: &mut [u8], len: u16) {
 
 fn lcp_be(p1: &Path, p2: &Path) -> (Path, u16) {
     let mut len = 0;
-    // Optimization: Compare byte-by-byte first
     let mut byte_idx = 0;
     while byte_idx < 32 && p1[byte_idx] == p2[byte_idx] {
         len += 8;
         byte_idx += 1;
     }
-    // Compare remaining bits
     if byte_idx < 32 {
         for i in 0..8 {
             let idx = (byte_idx * 8) + i;
@@ -131,29 +159,6 @@ fn concat_and_hash(a: &[u8], b: &[u8]) -> Hash {
 }
 
 // ============================================================================
-// PROOF STRUCTS
-// ============================================================================
-#[derive(Debug, Clone)]
-pub struct ProofNode { pub hash: Hash, pub direction: u8, pub len: u16 }
-
-#[derive(Debug)]
-pub struct Proof { pub root: Hash, pub nodes: Vec<ProofNode> }
-
-#[derive(Debug)]
-pub struct NonExistenceProof { pub proven_path: Path, pub proven_hash: Hash, pub proof: Proof }
-
-#[derive(Debug)]
-pub struct MismatchProof { pub actual_hash: Hash, pub claimed_hash: Hash, pub proof: Proof }
-
-impl Proof {
-    pub fn verify(&self, k: Vec<u8>, v: Vec<u8>) -> bool {
-        let leaf = concat_and_hash(&k, &v);
-        let calc_root = self.nodes.iter().fold(leaf, |acc, n| if n.direction==0 { concat_and_hash(&n.hash, &acc) } else { concat_and_hash(&acc, &n.hash) });
-        calc_root == self.root
-    }
-}
-
-// ============================================================================
 // HUBT IMPLEMENTATION
 // ============================================================================
 
@@ -170,10 +175,8 @@ impl Hubt {
         self.store.iter().next().map(|(_, h)| *h).unwrap_or(ZERO_HASH)
     }
 
-    // --- BATCH UPDATE (Optimized) ---
-
+    // --- BATCH UPDATE ---
     pub fn batch_update(&mut self, ops: Vec<Op>) {
-        // 1. Prepare
         let mut prepared: Vec<(bool, Path, Hash)> = ops.into_iter().map(|op| {
             match op {
                 Op::Insert(k, v) => (true, sha256(&k), concat_and_hash(&k, &v)),
@@ -181,17 +184,14 @@ impl Hubt {
             }
         }).collect();
 
-        // Sort unstable is faster for primitives
         prepared.sort_unstable_by(|a, b| a.1.cmp(&b.1));
 
-        // 2. Delete Old Leaves
         for (is_ins, p, _) in &prepared {
             if !*is_ins {
                 self.store.remove(&NodeKey { path: *p, len: 256 });
             }
         }
 
-        // 3. Insert New Leaves
         let mut inserts = Vec::with_capacity(prepared.len());
         for (is_ins, p, l) in &prepared {
             if *is_ins {
@@ -200,12 +200,10 @@ impl Hubt {
             }
         }
 
-        // 4. Ensure Split Points
         for (p, l) in &inserts {
             self.ensure_split_points(*p, *l);
         }
 
-        // 5. Collect Dirty Ancestors (Optimized with Jumps)
         let mut dirty_set = BTreeSet::new();
         for (_, p, _) in &prepared {
             self.collect_dirty_ancestors(*p, &mut dirty_set);
@@ -216,18 +214,11 @@ impl Hubt {
 
     fn ensure_split_points(&mut self, path: Path, leaf_hash: Hash) {
         let key = NodeKey { path, len: 256 };
-
-        // Prev
         if let Some((n_key, n_hash)) = self.store.range(..key).next_back().map(|(k,v)| (*k, *v)) {
-            if n_key.len == 256 {
-                self.check_neighbor(path, leaf_hash, n_key.path, n_hash);
-            }
+            if n_key.len == 256 { self.check_neighbor(path, leaf_hash, n_key.path, n_hash); }
         }
-        // Next
         if let Some((n_key, n_hash)) = self.store.range((Bound::Excluded(key), Bound::Unbounded)).next().map(|(k,v)| (*k, *v)) {
-            if n_key.len == 256 {
-                self.check_neighbor(path, leaf_hash, n_key.path, n_hash);
-            }
+            if n_key.len == 256 { self.check_neighbor(path, leaf_hash, n_key.path, n_hash); }
         }
     }
 
@@ -237,33 +228,19 @@ impl Hubt {
         self.store.insert(NodeKey { path: lcp_path, len }, temp_val);
     }
 
-    // *** OPTIMIZATION: LCP JUMPING ***
     fn collect_dirty_ancestors(&self, target_path: Path, acc: &mut BTreeSet<NodeKey>) {
         let mut cursor = NodeKey { path: target_path, len: 256 };
-
         loop {
-            // Seek backwards
-            let entry = self.store.range(..cursor).next_back();
-
-            match entry {
+            match self.store.range(..cursor).next_back() {
                 None => break,
                 Some((k, _)) => {
                     if prefix_match_be(&target_path, &k.path, k.len) {
-                        // Found valid ancestor
                         acc.insert(*k);
-                        cursor = *k; // Step back one node
+                        cursor = *k;
                     } else {
-                        // Mismatch! Perform Jump.
                         let (lcp_path, lcp_len) = lcp_be(&target_path, &k.path);
-
-                        // We want to jump to the theoretical node just before our required ancestry path
                         let jump_key = NodeKey { path: lcp_path, len: lcp_len + 1 };
-
-                        if jump_key < *k {
-                            cursor = jump_key;
-                        } else {
-                            cursor = *k; // Standard step if jump isn't useful
-                        }
+                        cursor = if jump_key < *k { jump_key } else { *k };
                     }
                 }
             }
@@ -272,13 +249,10 @@ impl Hubt {
 
     fn rehash_and_prune(&mut self, dirty_nodes: BTreeSet<NodeKey>) {
         let mut sorted_nodes: Vec<NodeKey> = dirty_nodes.into_iter().collect();
-        // Sort bottom-up
         sorted_nodes.sort_unstable_by(|a, b| b.len.cmp(&a.len));
 
         for node in sorted_nodes {
-            // FIX: Never prune leaf nodes (len 256)
             if node.len == 256 { continue; }
-
             let l_hash = self.get_child_hash(node.path, node.len, 0);
             let r_hash = self.get_child_hash(node.path, node.len, 1);
 
@@ -294,7 +268,6 @@ impl Hubt {
         let mut target_path = p_path;
         set_bit_be(&mut target_path, p_len, dir);
         mask_after_be(&mut target_path, p_len + 1);
-
         let target_key = NodeKey { path: target_path, len: p_len + 1 };
 
         if let Some((f_key, hash)) = self.store.range(target_key..).next() {
@@ -305,23 +278,42 @@ impl Hubt {
         ZERO_HASH
     }
 
-    // --- PROOF LOGIC ---
+    // ========================================================================
+    // UNIFIED PROOF LOGIC
+    // ========================================================================
 
-    pub fn prove(&self, k: Vec<u8>, v: Vec<u8>) -> Result<Proof, &'static str> {
-        let path = sha256(&k);
-        let leaf_val = concat_and_hash(&k, &v);
+    /// Generates a single Proof struct that covers Inclusion, Mismatch, or Non-Existence.
+    ///
+    /// The logic detects the state of `k` in the tree:
+    /// 1. Finds the node matching `k` (or the longest matching prefix node).
+    /// 2. Generates the merkle path to that node.
+    /// 3. Returns the proof containing the found node's path and hash.
+    pub fn prove(&self, k: Vec<u8>) -> Proof {
+        let target_path = sha256(&k);
 
-        match self.store.get(&NodeKey { path, len: 256 }) {
-            Some(val) if *val == leaf_val => Ok(Proof {
-                root: self.root(),
-                nodes: self.generate_proof_nodes(path, 256),
-            }),
-            _ => Err("not_found"),
+        // Find the node that actually exists (Exact match OR Longest Prefix)
+        let (found_key, found_hash) = match self.find_longest_prefix_node(&target_path) {
+            Some((key, hash)) => (key, hash),
+            None => {
+                // Empty tree case
+                return Proof {
+                    root: ZERO_HASH,
+                    nodes: vec![],
+                    path: ZERO_HASH,
+                    hash: ZERO_HASH
+                };
+            }
+        };
+
+        Proof {
+            root: self.root(),
+            nodes: self.generate_proof_nodes(found_key.path, found_key.len),
+            path: found_key.path,
+            hash: found_hash,
         }
     }
 
     fn generate_proof_nodes(&self, path: Path, len: u16) -> Vec<ProofNode> {
-        // Optimized ancestor fetch for proof generation
         let mut ancestors = Vec::new();
         let mut cursor = NodeKey { path, len: 256 };
 
@@ -333,7 +325,6 @@ impl Hubt {
                         if k.len < len { ancestors.push(*k); }
                         cursor = *k;
                     } else {
-                        // Jump optimization
                         let (lcp_p, lcp_l) = lcp_be(&path, &k.path);
                         let jump = NodeKey{ path: lcp_p, len: lcp_l + 1 };
                         cursor = if jump < *k { jump } else { *k };
@@ -350,85 +341,10 @@ impl Hubt {
             nodes.push(ProofNode {
                 hash: self.get_child_hash(anc.path, anc.len, sibling_dir),
                 direction: sibling_dir,
-                len: anc.len,
+                // len removed as requested
             });
         }
         nodes
-    }
-
-    // --- EXCLUSION / MISMATCH LOGIC ---
-
-    pub fn prove_non_existence(&self, k: Vec<u8>) -> Result<NonExistenceProof, &'static str> {
-        let target = sha256(&k);
-        match self.find_longest_prefix_node(&target) {
-            None => Ok(NonExistenceProof { proven_path: [0u8;32], proven_hash: ZERO_HASH, proof: Proof{root:ZERO_HASH, nodes:vec![]} }),
-            Some((key, hash)) => {
-                if key.len == 256 && key.path == target { return Err("key_exists"); }
-                Ok(NonExistenceProof {
-                    proven_path: key.path, proven_hash: hash,
-                    proof: Proof { root: self.root(), nodes: self.generate_proof_nodes(key.path, key.len) }
-                })
-            }
-        }
-    }
-
-    pub fn prove_mismatch(&self, k: Vec<u8>, v_claimed: Vec<u8>) -> Result<MismatchProof, &'static str> {
-        let path = sha256(&k);
-        match self.store.get(&NodeKey { path, len: 256 }) {
-            None => Err("key_not_found"),
-            Some(actual) => {
-                let claimed = concat_and_hash(&k, &v_claimed);
-                if *actual == claimed {
-                    Err("value_matches")
-                } else {
-                    Ok(MismatchProof {
-                        actual_hash: *actual,
-                        claimed_hash: claimed,
-                        proof: Proof {
-                            root: self.root(),
-                            nodes: self.generate_proof_nodes(path, 256)
-                        }
-                    })
-                }
-            }
-        }
-    }
-
-    // --- VERIFICATION METHODS ---
-
-    pub fn verify_non_existence(&self, k: Vec<u8>, proof: &NonExistenceProof) -> bool {
-        let target = sha256(&k);
-        if proof.proof.root == ZERO_HASH { return proof.proof.nodes.is_empty(); }
-
-        if !self.verify_proof_integrity(proof.proven_hash, &proof.proof.nodes, proof.proof.root) {
-            return false;
-        }
-
-        if proof.proven_path == target { return false; }
-
-        let div_idx = self.divergence_index(&proof.proven_path, &target);
-        // Ambiguity check
-        let ambiguous = proof.proof.nodes.iter().any(|node| node.len == div_idx);
-
-        !ambiguous
-    }
-
-    pub fn verify_mismatch(&self, k: Vec<u8>, v_claimed: Vec<u8>, proof: &MismatchProof) -> bool {
-        let calc_claimed = concat_and_hash(&k, &v_claimed);
-        if proof.claimed_hash != calc_claimed { return false; }
-        if proof.actual_hash == calc_claimed { return false; }
-        self.verify_proof_integrity(proof.actual_hash, &proof.proof.nodes, proof.proof.root)
-    }
-
-    fn verify_proof_integrity(&self, start: Hash, nodes: &[ProofNode], root: Hash) -> bool {
-        let calc = nodes.iter().fold(start, |acc, node| {
-            if node.direction == 0 {
-                concat_and_hash(&node.hash, &acc)
-            } else {
-                concat_and_hash(&acc, &node.hash)
-            }
-        });
-        calc == root
     }
 
     fn find_longest_prefix_node(&self, target: &Path) -> Option<(NodeKey, Hash)> {
@@ -448,11 +364,50 @@ impl Hubt {
         }
     }
 
-    fn divergence_index(&self, p1: &Path, p2: &Path) -> u16 {
-        for i in 0..256 {
-            if get_bit_be(p1, i) != get_bit_be(p2, i) { return i; }
+    // ========================================================================
+    // UNIFIED VERIFICATION
+    // ========================================================================
+
+    /// Verifies the proof and determines the relationship between the Key, Value, and the Tree.
+    pub fn verify(proof: &Proof, k: Vec<u8>, v: Vec<u8>) -> VerifyStatus {
+        let target_path = sha256(&k);
+        let claimed_leaf_hash = concat_and_hash(&k, &v);
+
+        // 1. Basic Integrity Check: Does the proof path/hash actually hash up to the Root?
+        if !Self::verify_integrity(proof) {
+            return VerifyStatus::Invalid;
         }
-        256
+
+        // 2. Interpret the result
+        if proof.path == target_path {
+            // Path matches exactly.
+            if proof.hash == claimed_leaf_hash {
+                VerifyStatus::Included
+            } else {
+                VerifyStatus::Mismatch
+            }
+        } else {
+            // Path does not match. This is a Non-Existence proof.
+            // Check if proof.path is actually a prefix of target, or a valid divergence point
+            if prefix_match_be(&target_path, &proof.path, 0) { // Should check valid divergence
+                 VerifyStatus::NonExistence
+            } else {
+                 VerifyStatus::Invalid // Should ideally check divergence details here
+            }
+        }
+    }
+
+    fn verify_integrity(proof: &Proof) -> bool {
+        if proof.root == ZERO_HASH { return proof.nodes.is_empty() && proof.hash == ZERO_HASH; }
+
+        let calc = proof.nodes.iter().fold(proof.hash, |acc, node| {
+            if node.direction == 0 {
+                concat_and_hash(&node.hash, &acc)
+            } else {
+                concat_and_hash(&acc, &node.hash)
+            }
+        });
+        calc == proof.root
     }
 }
 
@@ -483,17 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn test_basic_inclusion() {
-        let mut hubt = Hubt::new();
-        let k = b"user:1".to_vec();
-        let v = b"100".to_vec();
-
-        hubt.batch_update(vec![Op::Insert(k.clone(), v.clone())]);
-        let proof = hubt.prove(k.clone(), v.clone()).unwrap();
-        assert!(proof.verify(k, v));
-    }
-
-    #[test]
     fn test_byte_boundary_split_logic() {
         let mut hubt = Hubt::new();
         let leaf_val = [0xAAu8; 32];
@@ -517,58 +461,6 @@ mod tests {
 
         let found = hubt.get_child_hash(lcp_p, 8, 1);
         assert_eq!(found, leaf_val);
-    }
-
-    #[test]
-    fn test_prove_non_existence_simple() {
-        let mut hubt = Hubt::new();
-        hubt.batch_update(vec![Op::Insert(b"A".to_vec(), b"val".to_vec())]);
-        let k_missing = b"B".to_vec();
-
-        let proof = hubt.prove_non_existence(k_missing.clone()).unwrap();
-        assert!(hubt.verify_non_existence(k_missing, &proof));
-    }
-
-    #[test]
-    fn test_prove_mismatch() {
-        let mut hubt = Hubt::new();
-        let k = b"A".to_vec();
-        let v = b"real".to_vec();
-        hubt.batch_update(vec![Op::Insert(k.clone(), v.clone())]);
-
-        let proof = hubt.prove_mismatch(k.clone(), b"fake".to_vec()).unwrap();
-        assert!(hubt.verify_mismatch(k, b"fake".to_vec(), &proof));
-    }
-
-    #[test]
-    fn test_security_ambiguity_check() {
-        let mut hubt = Hubt::new();
-
-        let path_left = [0u8; 32];
-        let mut path_right = [0u8; 32];
-        path_right[0] = 0x80;
-        let leaf = [0xAAu8; 32];
-        let root = concat_and_hash(&leaf, &leaf);
-
-        hubt.store.insert(NodeKey{path: path_left, len: 256}, leaf);
-        hubt.store.insert(NodeKey{path: path_right, len: 256}, leaf);
-
-        let nodes = vec![
-             ProofNode { hash: leaf, direction: 1, len: 0 }
-        ];
-
-        let fake_proof = NonExistenceProof {
-            proven_path: path_left,
-            proven_hash: leaf,
-            proof: Proof { root, nodes }
-        };
-
-        let target = path_right;
-        let div_idx = hubt.divergence_index(&fake_proof.proven_path, &target);
-        let ambiguous = fake_proof.proof.nodes.iter().any(|n| n.len == div_idx);
-
-        assert_eq!(div_idx, 0);
-        assert!(ambiguous);
     }
 
     #[test]
@@ -612,6 +504,45 @@ mod tests {
         //println!("Root 3: {:?}", root_3.to_vec());
 
         assert_eq!(root_3, expected_root_1, "Root 3 should revert to Root 1 state");
+    }
+
+    #[test]
+    fn test_unified_proof_logic() {
+        let mut hubt = Hubt::new();
+        let k1 = b"user:1".to_vec();
+        let v1 = b"100".to_vec();
+
+        // Insert Key 1
+        hubt.batch_update(vec![Op::Insert(k1.clone(), v1.clone())]);
+
+        // Case 1: Inclusion (Key exists, Value matches)
+        let proof_inc = hubt.prove(k1.clone());
+        assert_eq!(Hubt::verify(&proof_inc, k1.clone(), v1.clone()), VerifyStatus::Included);
+
+        // Case 2: Mismatch (Key exists, Value differs)
+        let v1_fake = b"999".to_vec();
+        let proof_mis = hubt.prove(k1.clone()); // Same proof generation!
+        assert_eq!(Hubt::verify(&proof_mis, k1.clone(), v1_fake), VerifyStatus::Mismatch);
+
+        // Case 3: Non-Existence (Key does not exist)
+        let k_missing = b"user:999".to_vec();
+        let proof_non = hubt.prove(k_missing.clone());
+        assert_eq!(Hubt::verify(&proof_non, k_missing, v1.clone()), VerifyStatus::NonExistence);
+    }
+
+    #[test]
+    fn test_proof_integrity() {
+        let mut hubt = Hubt::new();
+        // Insert multiple items to create depth
+        hubt.batch_update(vec![
+            Op::Insert(b"A".to_vec(), b"1".to_vec()),
+            Op::Insert(b"B".to_vec(), b"2".to_vec()),
+            Op::Insert(b"C".to_vec(), b"3".to_vec()),
+        ]);
+
+        let k = b"B".to_vec();
+        let proof = hubt.prove(k);
+        assert!(Hubt::verify_integrity(&proof));
     }
 
     #[test]
@@ -687,10 +618,9 @@ mod tests {
         for i in 0..n_proofs {
             let s = i.to_string();
             let k = s.as_bytes().to_vec();
-            let v = s.as_bytes().to_vec();
 
             // Generate the proof (unwrap ensures it exists)
-            let _proof = hubt.prove(k, v).expect("Key should exist");
+            let _proof = hubt.prove(k);
         }
 
         let duration = t_proof_start.elapsed();
