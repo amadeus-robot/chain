@@ -261,8 +261,24 @@ impl<'de, 'a> de::EnumAccess<'de> for EnumDeserializer<'a, 'de> {
     type Variant = Self;
 
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
-        let val = seed.deserialize(&mut *self.de)?;
-        Ok((val, self))
+        // Check if this is a unit variant (just a string) or struct/tuple variant (proplist wrapper)
+        let tag = self.de.read_byte()?;
+        if tag == 5 {
+            // Unit variant: just a string
+            let len = self.de.read_length()?;
+            let bytes = self.de.read_bytes(len)?;
+            let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
+            let val = seed.deserialize(de::value::BorrowedStrDeserializer::new(text))?;
+            Ok((val, self))
+        } else if tag == 7 {
+            // Struct/tuple variant: proplist { variant_name: content }
+            let outer_len = self.de.read_length()?;
+            if outer_len != 1 { return Err(Error::Message("expected single-entry proplist for enum".into())); }
+            let val = seed.deserialize(&mut *self.de)?;
+            Ok((val, self))
+        } else {
+            Err(Error::InvalidTag)
+        }
     }
 }
 

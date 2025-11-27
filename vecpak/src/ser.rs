@@ -20,7 +20,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     type SerializeTupleVariant = Self;
     type SerializeMap = MapSerializer<'a>;
     type SerializeStruct = MapSerializer<'a>;
-    type SerializeStructVariant = Self;
+    type SerializeStructVariant = StructVariantSerializer<'a>;
 
     fn serialize_bool(self, v: bool) -> Result<()> {
         self.output.push(if v { 1 } else { 2 });
@@ -114,11 +114,11 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_struct_variant(self, _name: &'static str, _idx: u32, variant: &'static str, _len: usize) -> Result<Self::SerializeStructVariant> {
-        self.output.push(7);
-        encode_varint(&mut self.output, 1);
-        self.serialize_str(variant)?;
-        self.output.push(7);
-        Ok(self)
+        let mut variant_bytes = Vec::new();
+        variant_bytes.push(5);
+        encode_varint(&mut variant_bytes, variant.len() as i128);
+        variant_bytes.extend_from_slice(variant.as_bytes());
+        Ok(StructVariantSerializer { ser: self, variant_bytes, entries: Vec::new() })
     }
 }
 
@@ -150,14 +150,41 @@ impl<'a> ser::SerializeTupleVariant for &'a mut Serializer {
     fn end(self) -> Result<()> { Ok(()) }
 }
 
-impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
+pub struct StructVariantSerializer<'a> {
+    ser: &'a mut Serializer,
+    variant_bytes: Vec<u8>,
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl<'a> ser::SerializeStructVariant for StructVariantSerializer<'a> {
     type Ok = ();
     type Error = Error;
+
     fn serialize_field<T: ?Sized + Serialize>(&mut self, key: &'static str, value: &T) -> Result<()> {
-        key.serialize(&mut **self)?;
-        value.serialize(&mut **self)
+        let mut key_serializer = Serializer { output: Vec::new() };
+        key.serialize(&mut key_serializer)?;
+        let mut value_serializer = Serializer { output: Vec::new() };
+        value.serialize(&mut value_serializer)?;
+        self.entries.push((key_serializer.output, value_serializer.output));
+        Ok(())
     }
-    fn end(self) -> Result<()> { Ok(()) }
+
+    fn end(self) -> Result<()> {
+        let mut entries = self.entries;
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        // Outer proplist: { variant_name: inner_proplist }
+        self.ser.output.push(7);
+        encode_varint(&mut self.ser.output, 1);
+        self.ser.output.extend_from_slice(&self.variant_bytes);
+        // Inner proplist with sorted fields
+        self.ser.output.push(7);
+        encode_varint(&mut self.ser.output, entries.len() as i128);
+        for (key_bytes, value_bytes) in entries {
+            self.ser.output.extend_from_slice(&key_bytes);
+            self.ser.output.extend_from_slice(&value_bytes);
+        }
+        Ok(())
+    }
 }
 
 pub struct MapSerializer<'a> {

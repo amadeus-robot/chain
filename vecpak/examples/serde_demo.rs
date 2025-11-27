@@ -78,6 +78,73 @@ fn main() {
     assert_eq!(complex_data_term, decoded_term_complex);
     assert_eq!(encoded_term_complex, encoded_struct_complex);
 
+    let mutations_struct = Mutations(vec![
+        Mutation::Put {
+            op: b"op1".to_vec(),
+            key: b"key1".to_vec(),
+            value: b"value1".to_vec(),
+        },
+        Mutation::Delete {
+            op: b"op2".to_vec(),
+            key: b"key2".to_vec(),
+        },
+        Mutation::SetBit {
+            op: b"op3".to_vec(),
+            key: b"key3".to_vec(),
+            value: 42,
+            bloomsize: 1024,
+        },
+        Mutation::ClearBit {
+            op: b"op4".to_vec(),
+            key: b"key4".to_vec(),
+            value: 7,
+        },
+    ]);
+
+    let mutations_term = vecpak::Term::List(vec![
+        vecpak::Term::PropList(vec![(
+            vecpak::Term::Binary(b"Put".to_vec()),
+            vecpak::Term::PropList(vec![
+                (vecpak::Term::Binary(b"op".to_vec()), vecpak::Term::Binary(b"op1".to_vec())),
+                (vecpak::Term::Binary(b"key".to_vec()), vecpak::Term::Binary(b"key1".to_vec())),
+                (vecpak::Term::Binary(b"value".to_vec()), vecpak::Term::Binary(b"value1".to_vec())),
+            ]),
+        )]),
+        vecpak::Term::PropList(vec![(
+            vecpak::Term::Binary(b"Delete".to_vec()),
+            vecpak::Term::PropList(vec![
+                (vecpak::Term::Binary(b"op".to_vec()), vecpak::Term::Binary(b"op2".to_vec())),
+                (vecpak::Term::Binary(b"key".to_vec()), vecpak::Term::Binary(b"key2".to_vec())),
+            ]),
+        )]),
+        vecpak::Term::PropList(vec![(
+            vecpak::Term::Binary(b"SetBit".to_vec()),
+            vecpak::Term::PropList(vec![
+                (vecpak::Term::Binary(b"op".to_vec()), vecpak::Term::Binary(b"op3".to_vec())),
+                (vecpak::Term::Binary(b"key".to_vec()), vecpak::Term::Binary(b"key3".to_vec())),
+                (vecpak::Term::Binary(b"value".to_vec()), vecpak::Term::VarInt(42)),
+                (vecpak::Term::Binary(b"bloomsize".to_vec()), vecpak::Term::VarInt(1024)),
+            ]),
+        )]),
+        vecpak::Term::PropList(vec![(
+            vecpak::Term::Binary(b"ClearBit".to_vec()),
+            vecpak::Term::PropList(vec![
+                (vecpak::Term::Binary(b"op".to_vec()), vecpak::Term::Binary(b"op4".to_vec())),
+                (vecpak::Term::Binary(b"key".to_vec()), vecpak::Term::Binary(b"key4".to_vec())),
+                (vecpak::Term::Binary(b"value".to_vec()), vecpak::Term::VarInt(7)),
+            ]),
+        )]),
+    ]);
+
+    let encoded_term_mutations = vecpak::encode(mutations_term.clone());
+    let decoded_struct_mutations: Mutations = from_slice(&encoded_term_mutations).unwrap();
+    let encoded_struct_mutations = to_vec(&mutations_struct).unwrap();
+    let decoded_term_mutations: vecpak::Term = vecpak::decode(&encoded_struct_mutations).unwrap();
+
+    assert_eq!(mutations_struct, decoded_struct_mutations);
+    assert_eq!(mutations_term, decoded_term_mutations);
+    assert_eq!(encoded_term_mutations, encoded_struct_mutations);
+
     println!("all tests passed");
 }
 
@@ -104,3 +171,30 @@ struct ComplexData {
     #[serde(with = "serde_bytes")]
     raw_data: Vec<u8>,
 }
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+enum Mutation {
+    Put {
+        #[serde(with = "serde_bytes")] op: Vec<u8>,
+        #[serde(with = "serde_bytes")] key: Vec<u8>,
+        #[serde(with = "serde_bytes")] value: Vec<u8>,
+    },
+    Delete {
+        #[serde(with = "serde_bytes")] op: Vec<u8>,
+        #[serde(with = "serde_bytes")] key: Vec<u8>,
+    },
+    SetBit {
+        #[serde(with = "serde_bytes")] op: Vec<u8>,
+        #[serde(with = "serde_bytes")] key: Vec<u8>,
+        value: u64,
+        bloomsize: u64,
+    },
+    ClearBit {
+        #[serde(with = "serde_bytes")] op: Vec<u8>,
+        #[serde(with = "serde_bytes")] key: Vec<u8>,
+        value: u64,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+struct Mutations(Vec<Mutation>);
